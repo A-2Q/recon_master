@@ -32,6 +32,21 @@ TARGET="${1}"
 CURRENT_STEP=0
 TOTAL_STEPS=9
 
+# ─── GLOBAL BASE URL (set once after connectivity check) ──────────────────────
+BASE_URL=""
+
+resolve_base_url() {
+    # Strip any accidental http:// or https:// and path the user may have passed
+    CLEAN_TARGET=$(echo "$TARGET" | sed 's|^https\?://||' | sed 's|/.*||')
+
+    # Always use HTTPS
+    BASE_URL="https://${CLEAN_TARGET}"
+
+    # Update TARGET to clean version (no scheme, no path)
+    TARGET="${CLEAN_TARGET}"
+    info "Resolved target: ${CYAN}${BASE_URL}${RESET}"
+}
+
 # ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 
 print_banner() {
@@ -205,8 +220,23 @@ phase_whois() {
     progress_bar $CURRENT_STEP $TOTAL_STEPS "WHOIS Lookup"
     section_header "PHASE 1A — WHOIS INFORMATION" "🌐"
 
+    # Extract root domain (last two labels) for meaningful WHOIS results
+    local root_domain
+    root_domain=$(echo "$TARGET" | awk -F. '{
+        n = NF
+        if (n >= 3 && $(n-1) ~ /^(com|net|org|gov|edu|co|org)$/)
+            print $(n-2)"."$(n-1)"."$n
+        else if (n >= 2)
+            print $(n-1)"."$n
+        else
+            print $0
+    }')
+
+    info "Querying WHOIS for root domain: ${CYAN}${root_domain}${RESET}"
+    echo ""
+
     local result
-    result=$(whois "$TARGET" 2>/dev/null)
+    result=$(whois "$root_domain" 2>/dev/null)
 
     if [[ -z "$result" ]]; then
         fail "WHOIS lookup failed or returned empty results"
@@ -215,21 +245,23 @@ phase_whois() {
 
     print_table_header
 
-    # Extract key fields
-    local registrar org country created expires nameservers
-    registrar=$(echo "$result"  | grep -iE "^registrar:"         | head -1 | cut -d: -f2- | xargs)
-    org=$(echo "$result"        | grep -iE "^org(-name)?:"       | head -1 | cut -d: -f2- | xargs)
-    country=$(echo "$result"    | grep -iE "^country:"           | head -1 | cut -d: -f2- | xargs)
-    created=$(echo "$result"    | grep -iE "^creat"              | head -1 | cut -d: -f2- | xargs)
-    expires=$(echo "$result"    | grep -iE "^expir"              | head -1 | cut -d: -f2- | xargs)
-    nameservers=$(echo "$result" | grep -iE "^name.?server:"     | awk '{print $2}' | tr '\n' ' ')
+    local registrar org country created expires nameservers admin_email
+    registrar=$(echo "$result"   | grep -iE "^registrar:"      | head -1 | cut -d: -f2- | xargs)
+    org=$(echo "$result"         | grep -iE "^org(-name)?:"    | head -1 | cut -d: -f2- | xargs)
+    country=$(echo "$result"     | grep -iE "^country:"        | head -1 | cut -d: -f2- | xargs)
+    created=$(echo "$result"     | grep -iE "^creat"           | head -1 | cut -d: -f2- | xargs)
+    expires=$(echo "$result"     | grep -iE "^expir"           | head -1 | cut -d: -f2- | xargs)
+    nameservers=$(echo "$result" | grep -iE "^name.?server:"   | awk '{print $2}' | tr '\n' ' ')
+    admin_email=$(echo "$result" | grep -iE "^admin.?email:"   | head -1 | cut -d: -f2- | xargs)
 
-    [[ -n "$registrar"   ]] && print_table_row "Registrar"   "$registrar"
+    print_table_row "Root Domain"   "$root_domain"
+    [[ -n "$registrar"   ]] && print_table_row "Registrar"    "$registrar"
     [[ -n "$org"         ]] && print_table_row "Organization" "$org"
     [[ -n "$country"     ]] && print_table_row "Country"      "$country"
     [[ -n "$created"     ]] && print_table_row "Created"      "$created"
     [[ -n "$expires"     ]] && print_table_row "Expires"      "$expires"
-    [[ -n "$nameservers" ]] && print_table_row "Nameservers"  "$nameservers"
+    [[ -n "$admin_email" ]] && print_table_row "Admin Email"  "$admin_email"
+    [[ -n "$nameservers" ]] && print_table_row "Nameservers"  "${nameservers:0:40}"
 
     print_table_footer
 }
@@ -239,31 +271,57 @@ phase_dns() {
     progress_bar $CURRENT_STEP $TOTAL_STEPS "DNS Records Enumeration"
     section_header "PHASE 1B — DNS RECORDS" "📋"
 
-    local record_types=("A" "AAAA" "MX" "NS" "TXT" "CNAME" "SOA" "PTR" "SRV")
+    # Root domain for records that only exist at apex (MX, NS, TXT, SOA)
+    local root_domain
+    root_domain=$(echo "$TARGET" | awk -F. '{
+        n = NF
+        if (n >= 3 && $(n-1) ~ /^(com|net|org|gov|edu|co)$/)
+            print $(n-2)"."$(n-1)"."$n
+        else if (n >= 2)
+            print $(n-1)"."$n
+        else
+            print $0
+    }')
+
+    info "Subdomain DNS  → ${CYAN}${TARGET}${RESET}"
+    info "Root domain    → ${CYAN}${root_domain}${RESET}"
+    echo ""
 
     print_table_header
 
-    for rtype in "${record_types[@]}"; do
+    # Records on the subdomain itself
+    for rtype in "A" "AAAA" "CNAME"; do
         local result
         result=$(dig +short "$rtype" "$TARGET" 2>/dev/null | head -5 | tr '\n' '  ')
         if [[ -n "$result" ]]; then
-            print_table_row "$rtype Record" "$result"
+            print_table_row "$rtype (subdomain)" "$result"
         else
-            print_table_row "$rtype Record" "${DIM}(not found)${RESET}"
+            print_table_row "$rtype (subdomain)" "${DIM}(not found)${RESET}"
+        fi
+    done
+
+    # Records on the root domain
+    for rtype in "NS" "MX" "TXT" "SOA"; do
+        local result
+        result=$(dig +short "$rtype" "$root_domain" 2>/dev/null | head -5 | tr '\n' '  ')
+        if [[ -n "$result" ]]; then
+            print_table_row "$rtype (root)" "${result:0:40}"
+        else
+            print_table_row "$rtype (root)" "${DIM}(not found)${RESET}"
         fi
     done
 
     print_table_footer
 
-    # Zone Transfer Attempt
+    # Zone Transfer — try against root domain nameservers
     echo ""
     info "Attempting DNS Zone Transfer (AXFR)..."
     local ns_list
-    ns_list=$(dig +short NS "$TARGET" 2>/dev/null)
+    ns_list=$(dig +short NS "$root_domain" 2>/dev/null)
     if [[ -n "$ns_list" ]]; then
         while IFS= read -r ns; do
             local axfr
-            axfr=$(dig @"$ns" "$TARGET" AXFR 2>/dev/null | grep -v "^;" | grep -v "^$")
+            axfr=$(dig @"$ns" "$root_domain" AXFR 2>/dev/null | grep -v "^;" | grep -v "^$")
             if [[ -n "$axfr" ]] && ! echo "$axfr" | grep -q "Transfer failed"; then
                 fail "Zone Transfer SUCCESSFUL on $ns — CRITICAL MISCONFIGURATION!"
                 echo "$axfr" | head -20 | while read -r line; do
@@ -426,13 +484,7 @@ phase_web_analysis() {
     progress_bar $CURRENT_STEP $TOTAL_STEPS "Web Headers & Technology Analysis"
     section_header "PHASE 3 — WEB ANALYSIS" "🌍"
 
-    local url
-    # Try HTTPS first, fallback to HTTP
-    if curl -s --max-time 5 "https://${TARGET}" -o /dev/null -w "%{http_code}" 2>/dev/null | grep -qE "^[23]"; then
-        url="https://${TARGET}"
-    else
-        url="http://${TARGET}"
-    fi
+    local url="${BASE_URL}"
 
     info "Fetching HTTP headers from ${CYAN}${url}${RESET}..."
     echo ""
@@ -530,8 +582,9 @@ phase_ssl() {
     progress_bar $CURRENT_STEP $TOTAL_STEPS "SSL/TLS Certificate Analysis"
     section_header "PHASE 4 — SSL/TLS ANALYSIS" "🔒"
 
+    local ssl_host="${CLEAN_TARGET}"
     local ssl_info
-    ssl_info=$(echo | openssl s_client -connect "${TARGET}:443" -servername "$TARGET" 2>/dev/null)
+    ssl_info=$(echo | openssl s_client -connect "${ssl_host}:443" -servername "$ssl_host" 2>/dev/null)
 
     if [[ -z "$ssl_info" ]]; then
         warn "Could not connect to port 443 — SSL may not be available"
@@ -595,12 +648,7 @@ phase_robots_sitemap() {
     progress_bar $CURRENT_STEP $TOTAL_STEPS "Robots.txt & Sitemap Analysis"
     section_header "PHASE 5 — ROBOTS.TXT & SITEMAP" "🤖"
 
-    local base_url
-    if curl -s --max-time 5 "https://${TARGET}" -o /dev/null -w "%{http_code}" | grep -qE "^[23]"; then
-        base_url="https://${TARGET}"
-    else
-        base_url="http://${TARGET}"
-    fi
+    local base_url="${BASE_URL}"
 
     # robots.txt
     info "Fetching robots.txt..."
@@ -673,14 +721,8 @@ phase_fuzzing() {
     progress_bar $CURRENT_STEP $TOTAL_STEPS "Directory & File Fuzzing"
     section_header "PHASE 6 — DIRECTORY FUZZING (feroxbuster)" "💣"
 
-    local base_url wordlist
-    if curl -s --max-time 5 "https://${TARGET}" -o /dev/null -w "%{http_code}" | grep -qE "^[23]"; then
-        base_url="https://${TARGET}"
-    else
-        base_url="http://${TARGET}"
-    fi
-
-    # Find a suitable wordlist
+    local base_url="${BASE_URL}"
+    local wordlist
     for wl in \
         "/usr/share/wordlists/dirb/common.txt" \
         "/usr/share/seclists/Discovery/Web-Content/common.txt" \
@@ -780,12 +822,7 @@ phase_param_fuzzing() {
     progress_bar $CURRENT_STEP $TOTAL_STEPS "Parameter Fuzzing with WFuzz"
     section_header "PHASE 7 — PARAMETER FUZZING (wfuzz)" "🎯"
 
-    local base_url
-    if curl -s --max-time 5 "https://${TARGET}" -o /dev/null -w "%{http_code}" | grep -qE "^[23]"; then
-        base_url="https://${TARGET}"
-    else
-        base_url="http://${TARGET}"
-    fi
+    local base_url="${BASE_URL}"
 
     # Wordlist for params
     local param_wordlist
@@ -881,6 +918,7 @@ main() {
     check_usage
     print_banner
     check_dependencies
+    resolve_base_url
 
     phase_whois
     phase_dns
