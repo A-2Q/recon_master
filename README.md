@@ -71,7 +71,7 @@ sudo apt install seclists -y
 
 ```bash
 # Clone the repository
-git clone https://github.com/A_2Q/recon_master.git
+git clone https://github.com/A-2Q/recon_master.git
 cd recon_master
 
 # Make executable
