@@ -1,0 +1,51 @@
+# ─── OS Files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Editor / IDE ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ─── Scan Output & Logs ────────────────────────────────────────────────────────
+*.log
+*.txt.bak
+output/
+results/
+reports/
+scans/
+loot/
+
+# ─── Temporary Files ───────────────────────────────────────────────────────────
+/tmp/
+*.tmp
+*.temp
+recon_minimal_wordlist.txt
+recon_params.txt
+
+# ─── Sensitive / Personal ──────────────────────────────────────────────────────
+.env
+*.key
+*.pem
+*.crt
+secrets/
+creds/
+targets.txt
+scope.txt
+
+# ─── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ─── Wordlists (too large for git) ─────────────────────────────────────────────
+wordlists/
+*.wordlist
+rockyou.txt
